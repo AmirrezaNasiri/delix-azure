@@ -1,4 +1,4 @@
-name: Integration tests
+name: Build and Apply
 on:
   push:
     branches:
@@ -8,35 +8,90 @@ on:
     branches:
       - 'main'
 
+env:
+  TF_CLOUD_ORGANIZATION: ${{ secrets.TF_CLOUD_ORGANIZATION }}
+  TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+  TF_WORKSPACE: ${{ secrets.TF_WORKSPACE }}
+  TF_CONFIG_DIRECTORY: "./"
 
 jobs:
   tflint:
-    name: Lint
+    name: Run Linter
     runs-on: ubuntu-22.04
+    if: false
 
     steps:
     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       name: Checkout source code
-
-    #- uses: actions/cache@v3
-    #  name: Cache plugin dir
-    #  with:
-    #    path: ~/.tflint.d/plugins
-    #    key: ${{ matrix.os }}-tflint-${{ hashFiles('.tflint.hcl') }}
 
     - uses: terraform-linters/setup-tflint@19a52fbac37dacb22a09518e4ef6ee234f2d4987 # v4.0.0
       name: Setup TFLint
       with:
         tflint_version: v0.44.1
 
-    - name: Show version
-      run: tflint --version
-
-    - name: Init TFLint
-      run: tflint --init
+    - name: Run TFLint
+      run: |
+        set -xe
+        make tflint
       env:
         # https://github.com/terraform-linters/tflint/blob/master/docs/user-guide/plugins.md#avoiding-rate-limiting
         GITHUB_TOKEN: ${{ github.token }}
 
-    - name: Run TFLint
-      run: tflint -f compact
+  tfsec:
+    name: Run Security Checks
+    runs-on: ubuntu-22.04
+    if: false
+
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        name: Checkout source code
+        with:
+          persist-credentials: false
+
+      # Currently, there is a problem with Sarif output reporting in tfsec.
+      # It's probably fixed in master branch, but we're waiting for an official
+      # release. Inspect newer version after v1.28.4.
+      - name: Run tfsec
+        run: |
+          set -xe
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+          make tfsec
+
+
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        name: Checkout source code
+
+      - name: Upload Configuration
+        uses: hashicorp/tfc-workflows-github/actions/upload-configuration@v1.0.0
+        id: plan-upload
+        with:
+          workspace: ${{ env.TF_WORKSPACE }}
+          directory: ${{ env.TF_CONFIG_DIRECTORY }}
+          speculative: true
+
+      - name: Create Plan Run
+        uses: hashicorp/tfc-workflows-github/actions/create-run@v1.0.0
+        id: plan-run
+        with:
+          workspace: ${{ env.TF_WORKSPACE }}
+          configuration_version: ${{ steps.plan-upload.outputs.configuration_version_id }}
+          plan_only: true
+
+      - name: Get Plan Output
+        uses: hashicorp/tfc-workflows-github/actions/plan-output@v1.0.0
+        id: plan-output
+        with:
+          plan: ${{ fromJSON(steps.plan-run.outputs.payload).data.relationships.plan.data.id }}
